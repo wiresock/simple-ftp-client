@@ -5,11 +5,12 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::time::Duration;
 use suppaftp::native_tls::{Error as TlsError, TlsConnector};
+use suppaftp::types::FileType;
 use suppaftp::{
     FtpError as SuppaFtpError, FtpStream as ImplFtpStream, NativeTlsConnector, NativeTlsFtpStream,
 };
-use suppaftp::types::FileType;
 use thiserror::Error;
 
 // Define a custom error type
@@ -63,6 +64,7 @@ fn upload_file_non_tls(
     username: Option<&String>,
     password: Option<&String>,
     filename: &Path,
+    mode: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut ftp_stream = ImplFtpStream::connect((server_url, 21))?;
     if let Some(username) = username {
@@ -72,6 +74,13 @@ fn upload_file_non_tls(
     } else {
         ftp_stream.login("anonymous", "")?;
     }
+
+    match mode {
+        "active" => ftp_stream = ftp_stream.active_mode(Duration::from_secs(10)),
+        "passive" => ftp_stream.set_mode(suppaftp::types::Mode::Passive),
+        _ => return Err(Box::from("Invalid mode. Use 'active' or 'passive'.")),
+    }
+
     let mut file = File::open(filename)?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
@@ -85,6 +94,7 @@ fn upload_file_tls(
     username: Option<&String>,
     password: Option<&String>,
     filename: &Path,
+    mode: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ftp_stream = NativeTlsFtpStream::connect((server_url, 21))?;
     let tls_connector = TlsConnector::builder()
@@ -101,6 +111,11 @@ fn upload_file_tls(
         ftp_stream.login("anonymous", "")?;
     }
     ftp_stream.transfer_type(FileType::Binary)?;
+    match mode {
+        "active" => ftp_stream = ftp_stream.active_mode(Duration::from_secs(10)),
+        "passive" => ftp_stream.set_mode(suppaftp::types::Mode::Passive),
+        _ => return Err(Box::from("Invalid mode. Use 'active' or 'passive'.")),
+    }
     let mut file = File::open(filename)?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
@@ -114,6 +129,7 @@ fn download_file_non_tls(
     username: Option<&String>,
     password: Option<&String>,
     filename: &str,
+    mode: &str,
 ) -> Result<(usize, String), FtpError> {
     let mut ftp_stream = ImplFtpStream::connect((server_url, 21))?;
     if let Some(username) = username {
@@ -123,6 +139,18 @@ fn download_file_non_tls(
     } else {
         ftp_stream.login("anonymous", "")?;
     }
+
+    match mode {
+        "active" => ftp_stream = ftp_stream.active_mode(Duration::from_secs(10)),
+        "passive" => ftp_stream.set_mode(suppaftp::types::Mode::Passive),
+        _ => {
+            return Err(FtpError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid mode. Use 'active' or 'passive'.",
+            )))
+        }
+    }
+
     let mut reader = ftp_stream.retr_as_buffer(filename)?;
     let mut buffer = Vec::new();
     reader.read_to_end(&mut buffer)?;
@@ -138,6 +166,7 @@ fn download_file_tls(
     username: Option<&String>,
     password: Option<&String>,
     filename: &str,
+    mode: &str,
 ) -> Result<(usize, String), FtpError> {
     let ftp_stream = NativeTlsFtpStream::connect((server_url, 21))?;
     let tls_connector = TlsConnector::builder()
@@ -154,6 +183,16 @@ fn download_file_tls(
         ftp_stream.login("anonymous", "")?;
     }
     ftp_stream.transfer_type(FileType::Binary)?;
+    match mode {
+        "active" => ftp_stream = ftp_stream.active_mode(Duration::from_secs(10)),
+        "passive" => ftp_stream.set_mode(suppaftp::types::Mode::Passive),
+        _ => {
+            return Err(FtpError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid mode. Use 'active' or 'passive'.",
+            )))
+        }
+    }
     let mut reader = ftp_stream.retr_as_buffer(filename)?;
     let mut buffer = Vec::new();
     reader.read_to_end(&mut buffer)?;
@@ -236,6 +275,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .help("Specifies the number of iterations for upload/download")
                 .default_value("1"),
         ) // Default to 1 iteration
+        .arg(
+            Arg::new("mode")
+                .long("mode")
+                .short('m')
+                .value_name("MODE")
+                .help("Sets the FTP mode (active/passive)")
+                .required(false)
+                .default_value("passive"),
+        )
         .get_matches();
 
     if !matches.args_present() {
@@ -261,19 +309,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .get_one::<String>("iterations")
             .and_then(|it| it.parse::<usize>().ok())
             .unwrap_or(1);
+        let mode = matches.get_one::<String>("mode").unwrap();
         for _ in 0..iterations {
             // Check if upload is specified
             if let Some(file) = matches.get_one::<String>("upload") {
                 println!("{} - Start uploading file: {}", Local::now(), file);
                 if matches.get_one::<bool>("tls").copied().unwrap_or(false) {
-                    match upload_file_tls(server_url, username, password, Path::new(file)) {
+                    match upload_file_tls(server_url, username, password, Path::new(file), mode) {
                         Ok(_) => println!("{} - Uploaded: {}", Local::now(), file),
                         Err(e) => {
                             eprintln!("{} - Error uploading file {}: {}", Local::now(), file, e)
                         }
                     }
                 } else {
-                    match upload_file_non_tls(server_url, username, password, Path::new(file)) {
+                    match upload_file_non_tls(server_url, username, password, Path::new(file), mode)
+                    {
                         Ok(_) => println!("{} - Uploaded: {}", Local::now(), file),
                         Err(e) => {
                             eprintln!("{} - Error uploading file {}: {}", Local::now(), file, e)
@@ -286,7 +336,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(file) = matches.get_one::<String>("download") {
                 println!("{} - Start downloading file: {}", Local::now(), file);
                 if matches.get_one::<bool>("tls").copied().unwrap_or(false) {
-                    match download_file_tls(server_url, username, password, file) {
+                    match download_file_tls(server_url, username, password, file, mode) {
                         Ok((size, hash)) => println!(
                             "{} - {}: Downloaded. Size = {} bytes SHA256: {}",
                             Local::now(),
@@ -299,7 +349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 } else {
-                    match download_file_non_tls(server_url, username, password, file) {
+                    match download_file_non_tls(server_url, username, password, file, mode) {
                         Ok((size, hash)) => println!(
                             "{} - {}: Downloaded. Size = {} bytes SHA256: {}",
                             Local::now(),
