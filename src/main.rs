@@ -1,12 +1,15 @@
 use chrono::Local;
 use clap::{Arg, Command};
-use suppaftp::{FtpError as SuppaFtpError, FtpStream as ImplFtpStream, NativeTlsFtpStream, NativeTlsConnector};
-use suppaftp::native_tls::{TlsConnector, Error as TlsError};
 use rand::{distributions::Alphanumeric, Rng};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::Path;
+use suppaftp::native_tls::{Error as TlsError, TlsConnector};
+use suppaftp::{
+    FtpError as SuppaFtpError, FtpStream as ImplFtpStream, NativeTlsConnector, NativeTlsFtpStream,
+};
+use suppaftp::types::FileType;
 use thiserror::Error;
 
 // Define a custom error type
@@ -83,9 +86,13 @@ fn upload_file_tls(
     password: Option<&String>,
     filename: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut ftp_stream = NativeTlsFtpStream::connect((server_url, 21))?;
-    let tls_connector = NativeTlsConnector::from(TlsConnector::new()?);
-    ftp_stream = ftp_stream.into_secure(tls_connector, server_url)?;
+    let ftp_stream = NativeTlsFtpStream::connect((server_url, 21))?;
+    let tls_connector = TlsConnector::builder()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
+        .build()?;
+    let tls_connector = NativeTlsConnector::from(tls_connector);
+    let mut ftp_stream = ftp_stream.into_secure(tls_connector, server_url)?;
     if let Some(username) = username {
         let default_password = String::from("");
         let password = password.unwrap_or(&default_password);
@@ -93,6 +100,7 @@ fn upload_file_tls(
     } else {
         ftp_stream.login("anonymous", "")?;
     }
+    ftp_stream.transfer_type(FileType::Binary)?;
     let mut file = File::open(filename)?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
@@ -131,9 +139,13 @@ fn download_file_tls(
     password: Option<&String>,
     filename: &str,
 ) -> Result<(usize, String), FtpError> {
-    let mut ftp_stream = NativeTlsFtpStream::connect((server_url, 21))?;
-    let tls_connector = NativeTlsConnector::from(TlsConnector::new()?);
-    ftp_stream = ftp_stream.into_secure(tls_connector, server_url)?;
+    let ftp_stream = NativeTlsFtpStream::connect((server_url, 21))?;
+    let tls_connector = TlsConnector::builder()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
+        .build()?;
+    let tls_connector = NativeTlsConnector::from(tls_connector);
+    let mut ftp_stream = ftp_stream.into_secure(tls_connector, server_url)?;
     if let Some(username) = username {
         let default_password = String::from("");
         let password = password.unwrap_or(&default_password);
@@ -141,6 +153,7 @@ fn download_file_tls(
     } else {
         ftp_stream.login("anonymous", "")?;
     }
+    ftp_stream.transfer_type(FileType::Binary)?;
     let mut reader = ftp_stream.retr_as_buffer(filename)?;
     let mut buffer = Vec::new();
     reader.read_to_end(&mut buffer)?;
@@ -183,7 +196,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .short('s')
                 .value_name("URL")
                 .help("Sets the server URL")
-                .required(true),
+                .required(false),
         )
         .arg(
             Arg::new("username")
@@ -230,14 +243,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let server_url = matches.get_one::<String>("server").unwrap();
-    let username = matches.get_one::<String>("username");
-    let password = matches.get_one::<String>("password");
-    let iterations = matches
-        .get_one::<String>("iterations")
-        .and_then(|it| it.parse::<usize>().ok())
-        .unwrap_or(1);
-
     if let Some(file) = matches.get_one::<String>("generate") {
         let size = matches
             .get_one::<String>("size")
@@ -249,6 +254,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => eprintln!("Error: {}", e),
         }
     } else {
+        let server_url = matches.get_one::<String>("server").unwrap();
+        let username = matches.get_one::<String>("username");
+        let password = matches.get_one::<String>("password");
+        let iterations = matches
+            .get_one::<String>("iterations")
+            .and_then(|it| it.parse::<usize>().ok())
+            .unwrap_or(1);
         for _ in 0..iterations {
             // Check if upload is specified
             if let Some(file) = matches.get_one::<String>("upload") {
@@ -256,12 +268,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if matches.get_one::<bool>("tls").copied().unwrap_or(false) {
                     match upload_file_tls(server_url, username, password, Path::new(file)) {
                         Ok(_) => println!("{} - Uploaded: {}", Local::now(), file),
-                        Err(e) => eprintln!("{} - Error uploading file {}: {}", Local::now(), file, e),
+                        Err(e) => {
+                            eprintln!("{} - Error uploading file {}: {}", Local::now(), file, e)
+                        }
                     }
                 } else {
                     match upload_file_non_tls(server_url, username, password, Path::new(file)) {
                         Ok(_) => println!("{} - Uploaded: {}", Local::now(), file),
-                        Err(e) => eprintln!("{} - Error uploading file {}: {}", Local::now(), file, e),
+                        Err(e) => {
+                            eprintln!("{} - Error uploading file {}: {}", Local::now(), file, e)
+                        }
                     }
                 }
             }
@@ -278,7 +294,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             size,
                             hash
                         ),
-                        Err(e) => eprintln!("{} - Error downloading file {}: {}", Local::now(), file, e),
+                        Err(e) => {
+                            eprintln!("{} - Error downloading file {}: {}", Local::now(), file, e)
+                        }
                     }
                 } else {
                     match download_file_non_tls(server_url, username, password, file) {
@@ -289,7 +307,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             size,
                             hash
                         ),
-                        Err(e) => eprintln!("{} - Error downloading file {}: {}", Local::now(), file, e),
+                        Err(e) => {
+                            eprintln!("{} - Error downloading file {}: {}", Local::now(), file, e)
+                        }
                     }
                 }
             }
